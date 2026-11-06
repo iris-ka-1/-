@@ -1,0 +1,883 @@
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import json
+import sqlite3
+from datetime import datetime, timedelta
+
+# --- 1. БАЗА ДАННЫХ ---
+DB_FILE = "events_app.db"
+
+conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+cursor = conn.cursor()
+
+cursor.execute('''
+    CREATE TABLE IF NOT EXISTS events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT, 
+        author TEXT,
+        category TEXT, 
+        tags TEXT,
+        description TEXT, 
+        address TEXT, 
+        date_time TEXT,
+        duration TEXT,
+        max_participants TEXT,
+        restrictions TEXT,
+        extra_info TEXT,
+        checklist TEXT,
+        format_type TEXT,
+        images TEXT, 
+        is_official INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+''')
+
+cursor.execute('''
+    CREATE TABLE IF NOT EXISTS interest_tags (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        category TEXT,
+        tag_name TEXT UNIQUE
+    )
+''')
+
+initial_tags = [
+    ('sport', 'Бег'), ('sport', 'Йога'), ('sport', 'Волейбол'), ('sport', 'Велосипед'),
+    ('fandom', 'Genshin Impact'), ('fandom', 'Honkai'), ('fandom', 'Anime'), ('fandom', 'Marvel'),
+    ('hobby', 'Рисование'), ('hobby', 'Настолки'), ('hobby', 'Чтение'), ('hobby', 'Фотография'),
+    ('fun', 'Кофейни'), ('fun', 'Прогулки'), ('fun', 'Кино'), ('fun', 'Квизы'),
+    ('other', 'Бесплатно'), ('other', 'На свежем воздухе'), ('other', 'В помещении'), ('other', 'Творчество')
+]
+
+for cat, tag in initial_tags:
+    cursor.execute("INSERT OR IGNORE INTO interest_tags (category, tag_name) VALUES (?, ?)", (cat, tag))
+
+cursor.execute("SELECT COUNT(*) FROM events")
+if cursor.fetchone()[0] == 0:
+    cursor.execute('''
+        INSERT INTO events (title, author, category, tags, description, address, date_time, duration, max_participants, restrictions, extra_info, checklist, format_type, images, is_official) 
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (
+        "Главная встреча сообщества", 
+        "Ирис",
+        "Встреча", 
+        "Бесплатно, На свежем воздухе, Встреча, Спорт", 
+        "Наша самая первая и главная встреча! Будем знакомиться, пить чай и обсуждать планы на будущее.", 
+        "Большой Кремлевский сквер", 
+        (datetime.now() + timedelta(days=2)).strftime("%Y-%m-%d %H:%M"),
+        "2 часа",
+        "Неограниченно",
+        "16+", 
+        "Берите с собой хорошее настроение и термосы с чаем!",
+        "Термос, Плед",
+        "Оффлайн",
+        "", 
+        1
+    ))
+
+conn.commit()
+
+# --- 2. ИНТЕРФЕЙС ПРИЛОЖЕНИЯ ---
+HTML_CODE = """
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Мероприятия - Осенний вайб</title>
+    <style>
+        :root {
+            --bg-color: #FBF7F0;
+            --card-bg: #FFFFFF;
+            --primary-terracotta: #C85A32;
+            --secondary-mustard: #D99B26;
+            --accent-olive: #687A49;
+            --dark-brown: #3E2723;
+            --light-cream: #F2E8D5;
+            --gray-text: #786C66;
+            --border-color: #EADBC8;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        body {
+            background-color: #1E1E1E;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+        }
+
+        .app-container {
+            width: 100%;
+            max-width: 414px;
+            height: 100vh;
+            max-height: 896px;
+            background-color: var(--bg-color);
+            position: relative;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+            overflow: hidden;
+        }
+
+        .leaves-container {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none; z-index: 9999; overflow: hidden;
+        }
+
+        .leaf {
+            position: absolute; top: -40px; user-select: none;
+            animation: fallAnimation linear infinite;
+        }
+
+        @keyframes fallAnimation {
+            0% { transform: translateY(0px) rotate(0deg) translateX(0px); opacity: 0.5; }
+            50% { transform: translateY(50vh) rotate(180deg) translateX(25px); opacity: 0.3; }
+            100% { transform: translateY(105vh) rotate(360deg) translateX(-20px); opacity: 0; }
+        }
+
+        .top-header { margin-bottom: 12px; }
+        .top-header-title { color: var(--dark-brown); font-size: 18px; font-weight: bold; }
+
+        .content-area {
+            flex: 1; overflow-y: auto; padding: 14px; padding-bottom: 80px;
+            position: relative; z-index: 10;
+        }
+
+        .screen { display: none; animation: fadeIn 0.2s ease-in-out; }
+        .screen.active { display: block; }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(4px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .search-container { position: relative; margin-bottom: 12px; z-index: 110; }
+        .search-bar {
+            width: 100%; padding: 10px 14px; background-color: var(--light-cream);
+            border: 1px solid var(--border-color); border-radius: 20px; font-size: 14px;
+            color: var(--dark-brown); outline: none;
+        }
+
+        .suggestions-box {
+            position: absolute; top: 100%; left: 0; width: 100%; background: var(--card-bg);
+            border: 1px solid var(--border-color); border-radius: 12px; margin-top: 4px;
+            max-height: 150px; overflow-y: auto; z-index: 150; box-shadow: 0 4px 12px rgba(0,0,0,0.08); display: none;
+        }
+
+        .suggestion-item { padding: 8px 12px; font-size: 13px; color: var(--dark-brown); cursor: pointer; border-bottom: 1px solid var(--border-color); }
+
+        .ad-banner {
+            background: linear-gradient(135deg, var(--primary-terracotta), var(--secondary-mustard));
+            color: white; height: 110px; border-radius: 16px; display: flex; align-items: center;
+            justify-content: center; font-weight: bold; font-size: 16px; margin-bottom: 14px;
+        }
+
+        .event-card {
+            background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 14px;
+            padding: 12px; margin-bottom: 10px; display: flex; align-items: center; gap: 12px; cursor: pointer;
+        }
+        .event-card.official { border: 2px solid var(--primary-terracotta); background: linear-gradient(to right, #FFF9F5, #FFFFFF); }
+
+        .event-img {
+            width: 50px; height: 50px; background-color: var(--secondary-mustard); border-radius: 10px;
+            display: flex; align-items: center; justify-content: center; color: white; font-size: 20px; flex-shrink: 0; overflow: hidden;
+        }
+        .event-img img { width: 100%; height: 100%; object-fit: cover; }
+
+        .form-group { margin-bottom: 10px; }
+        .form-group label { display: block; font-size: 12px; font-weight: bold; color: var(--dark-brown); margin-bottom: 3px; }
+        .form-control {
+            width: 100%; padding: 8px 12px; background: var(--card-bg); border: 1px solid var(--border-color);
+            border-radius: 10px; font-size: 13px; color: var(--dark-brown); outline: none;
+        }
+        textarea.form-control { resize: vertical; min-height: 70px; }
+
+        .tag-input-group {
+            display: flex; gap: 6px; margin-top: 6px; align-items: center;
+        }
+        .btn-check-tag {
+            background-color: var(--primary-terracotta); color: white; border: none;
+            width: 36px; height: 36px; border-radius: 10px; font-size: 16px; font-weight: bold;
+            display: flex; align-items: center; justify-content: center; cursor: pointer; flex-shrink: 0;
+            transition: background-color 0.2s;
+        }
+        .btn-check-tag:active { background-color: var(--dark-brown); }
+
+        .chips-container { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 4px; }
+        .chip {
+            background: var(--light-cream); border: 1px solid var(--border-color); padding: 5px 10px;
+            border-radius: 14px; font-size: 11px; color: var(--dark-brown); cursor: pointer; transition: 0.2s; user-select: none;
+        }
+        .chip.selected { background: var(--primary-terracotta); color: white; border-color: var(--primary-terracotta); }
+
+        .btn-primary {
+            background-color: var(--primary-terracotta); color: white; border: none; padding: 10px 14px;
+            border-radius: 12px; font-weight: bold; font-size: 14px; cursor: pointer; width: 100%; text-align: center;
+        }
+
+        .btn-secondary {
+            background-color: transparent; color: var(--gray-text); border: 1px solid var(--border-color); padding: 8px 12px;
+            border-radius: 12px; font-weight: bold; font-size: 13px; cursor: pointer; width: 100%; text-align: center; margin-top: 6px;
+        }
+
+        .fab-container { position: absolute; bottom: 75px; right: 16px; z-index: 120; }
+        .fab {
+            background-color: var(--primary-terracotta); color: white; border: none; border-radius: 25px;
+            height: 50px; width: 50px; display: flex; align-items: center; justify-content: center;
+            font-size: 22px; font-weight: bold; box-shadow: 0 4px 12px rgba(200, 90, 50, 0.4); cursor: pointer;
+        }
+
+        .modal {
+            display: none; position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.5); justify-content: center; align-items: center; z-index: 200; padding: 16px;
+        }
+        .modal-content {
+            background: var(--card-bg); padding: 20px; border-radius: 18px; width: 100%;
+            max-width: 330px; max-height: 85vh; overflow-y: auto; box-shadow: 0 10px 25px rgba(0,0,0,0.2);
+        }
+
+        .bottom-nav {
+            position: absolute; bottom: 0; width: 100%; height: 60px; background-color: var(--dark-brown);
+            display: flex; justify-content: space-around; align-items: center; border-top-left-radius: 16px;
+            border-top-right-radius: 16px; z-index: 150;
+        }
+        .nav-item {
+            background: none; border: none; color: var(--light-cream); display: flex; flex-direction: column;
+            align-items: center; gap: 3px; font-size: 9px; cursor: pointer; opacity: 0.6; transition: 0.2s;
+        }
+        .nav-item.active { opacity: 1; color: var(--secondary-mustard); }
+        .nav-icon { font-size: 18px; }
+    </style>
+</head>
+<body>
+
+<div class="leaves-container" id="leavesContainer"></div>
+
+<!-- МОДАЛКА ВЫБОРА ТЕГОВ ПРИ СОЗДАНИИ -->
+<div id="tagsModal" class="modal" onclick="closeTagsModalOutside(event)">
+    <div class="modal-content">
+        <h3 style="color: var(--dark-brown); font-size: 16px; margin-bottom: 10px;">Выберите теги</h3>
+        <div id="modalTagsContainer"></div>
+        
+        <div class="tag-input-group">
+            <input type="text" class="form-control" id="modalCustomTagInput" placeholder="Добавить свой тег">
+            <button type="button" class="btn-check-tag" onclick="addModalCustomTag()">✓</button>
+        </div>
+
+        <button class="btn-primary" style="margin-top: 14px;" onclick="closeTagsModal()">Готово</button>
+    </div>
+</div>
+
+<!-- МОДАЛКА ФИЛЬТРОВ В ПОИСКЕ -->
+<div id="searchTagsModal" class="modal" onclick="closeSearchTagsModalOutside(event)">
+    <div class="modal-content">
+        <h3 style="color: var(--dark-brown); font-size: 16px; margin-bottom: 10px;">Фильтры по тегам</h3>
+        <div class="chips-container" id="searchFilterModalTags" style="margin-bottom: 14px;"></div>
+        <button class="btn-primary" style="margin-bottom: 8px;" onclick="applySearchFiltersModal()">Применить</button>
+        <button class="btn-secondary" onclick="clearSearchFilter()">Сбросить всё</button>
+    </div>
+</div>
+
+<!-- МОДАЛКА ВЫБОРА ДЛИТЕЛЬНОСТИ -->
+<div id="durationModal" class="modal" onclick="closeModalOutside(event, 'durationModal')">
+    <div class="modal-content">
+        <h3 style="color: var(--dark-brown); font-size: 16px; margin-bottom: 10px;">Длительность</h3>
+        <div class="chips-container" id="durationChipsContainer" style="margin-bottom: 14px;">
+            <span class="chip" onclick="selectDurationOption(this, '1 час')">1 час</span>
+            <span class="chip" onclick="selectDurationOption(this, '2 часа')">2 часа</span>
+            <span class="chip" onclick="selectDurationOption(this, '3 часа')">3 часа</span>
+            <span class="chip" onclick="selectDurationOption(this, 'Пол дня')">Пол дня</span>
+            <span class="chip" onclick="selectDurationOption(this, 'Весь день')">Весь день</span>
+        </div>
+        
+        <div class="tag-input-group">
+            <input type="text" class="form-control" id="customDurationInput" placeholder="Своя длительность">
+            <button type="button" class="btn-check-tag" onclick="addCustomDuration()">✓</button>
+        </div>
+    </div>
+</div>
+
+<!-- МОДАЛКА ВЫБОРА ОГРАНИЧЕНИЙ -->
+<div id="restrictionsModal" class="modal" onclick="closeModalOutside(event, 'restrictionsModal')">
+    <div class="modal-content">
+        <h3 style="color: var(--dark-brown); font-size: 16px; margin-bottom: 10px;">Ограничения</h3>
+        <div class="chips-container" id="restrictionsChipsContainer" style="margin-bottom: 14px;">
+            <span class="chip" onclick="toggleRestrictionOption(this, 'Без ограничений')">Без ограничений</span>
+            <span class="chip" onclick="toggleRestrictionOption(this, '16+')">16+</span>
+            <span class="chip" onclick="toggleRestrictionOption(this, '18+')">18+</span>
+            <span class="chip" onclick="toggleRestrictionOption(this, 'Новички')">Новички</span>
+            <span class="chip" onclick="toggleRestrictionOption(this, 'Только профи')">Только профи</span>
+        </div>
+        
+        <div class="tag-input-group" style="margin-bottom: 10px;">
+            <input type="text" class="form-control" id="customRestrictionInput" placeholder="Своё ограничение">
+            <button type="button" class="btn-check-tag" onclick="addCustomRestriction()">✓</button>
+        </div>
+
+        <button class="btn-primary" onclick="document.getElementById('restrictionsModal').style.display='none'">Готово</button>
+    </div>
+</div>
+
+<!-- КАСТОМНАЯ ЧИСТАЯ МОДАЛКА ВЫБОРА ДАТЫ И ВРЕМЕНИ -->
+<div id="dateTimeModal" class="modal" onclick="closeModalOutside(event, 'dateTimeModal')">
+    <div class="modal-content" style="text-align: center; padding: 22px 18px;">
+        <h3 style="color: var(--dark-brown); font-size: 16px; margin-bottom: 14px;">Дата и время встречи</h3>
+        
+        <div style="display: flex; gap: 10px; margin-bottom: 18px;">
+            <div style="flex: 1;">
+                <label style="font-size: 11px; color: var(--gray-text); margin-bottom: 3px; display: block; text-align: left;">Дата</label>
+                <input type="date" class="form-control" id="modalDateInput" style="text-align: center;">
+            </div>
+            <div style="flex: 1;">
+                <label style="font-size: 11px; color: var(--gray-text); margin-bottom: 3px; display: block; text-align: left;">Время</label>
+                <input type="time" class="form-control" id="modalTimeInput" style="text-align: center;">
+            </div>
+        </div>
+
+        <button class="btn-primary" onclick="applyDateTime()">Готово</button>
+    </div>
+</div>
+
+<div class="app-container">
+    <div class="content-area">
+
+        <!-- ЭКРАН 1: Лента -->
+        <div id="screen-feed" class="screen active">
+            <div class="search-container">
+                <input type="text" class="search-bar" id="searchInput" placeholder="Поиск мероприятий..." oninput="filterEvents(); showSuggestions('searchInput', 'feedSuggestions')">
+                <div id="feedSuggestions" class="suggestions-box"></div>
+            </div>
+            <div class="ad-banner">РЕКЛАМА</div>
+            <div id="eventsList"></div>
+        </div>
+
+        <!-- ЭКРАН 2: Поиск -->
+        <div id="screen-search" class="screen">
+            <div class="top-header"><div class="top-header-title">Поиск мероприятий</div></div>
+            <div class="search-container">
+                <input type="text" class="search-bar" id="searchTabInput" placeholder="Поиск по названию или тегам..." oninput="filterSearchTab(); showSuggestions('searchTabInput', 'searchSuggestions')">
+                <div id="searchSuggestions" class="suggestions-box"></div>
+            </div>
+            
+            <button type="button" class="btn-secondary" onclick="openSearchTagsModal()" style="margin-bottom: 14px;">🏷️ Фильтры по тегам</button>
+            <div id="searchTabList"></div>
+        </div>
+
+        <!-- ЭКРАН 3: Чаты -->
+        <div id="screen-chats" class="screen"><div class="top-header"><div class="top-header-title">Мои чаты</div></div><div id="chatsList"></div></div>
+
+        <!-- ЭКРАН 4: Подбор -->
+        <div id="screen-match" class="screen"><div class="top-header"><div class="top-header-title">Подбор компании</div></div></div>
+
+        <!-- ЭКРАН 5: Профиль -->
+        <div id="screen-profile" class="screen">
+            <div class="top-header"><div class="top-header-title">Мой Профиль</div></div>
+            <div style="background: var(--card-bg); padding: 18px; border-radius: 16px; border: 1px solid var(--border-color); text-align: center;">
+                <div style="width: 70px; height: 70px; border-radius: 50%; background: var(--light-cream); margin: 0 auto 10px; display: flex; align-items: center; justify-content: center; font-size: 30px;">👤</div>
+                <h3 style="color: var(--dark-brown); font-size: 16px;">Ирис</h3>
+                <p style="color: var(--gray-text); font-size: 12px; margin-bottom: 12px;">Тестовый профиль</p>
+                <h4 style="font-size: 12px; color: var(--primary-terracotta); margin-bottom: 6px; text-align: left;">Мои интересы:</h4>
+                <div class="chips-container">
+                    <span class="chip selected">Рисование</span>
+                    <span class="chip selected">Кофейни</span>
+                    <span class="chip selected">Genshin Impact</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- ЭКРАН 6: Создание мероприятия -->
+        <div id="screen-create" class="screen">
+            <div class="top-header"><div class="top-header-title">Создание мероприятия</div></div>
+            <div class="form-group"><label>Автор</label><input type="text" class="form-control" id="createAuthor" value="Ирис"></div>
+            <div class="form-group"><label>Название</label><input type="text" class="form-control" id="createTitle" placeholder="Название встречи"></div>
+            <div class="form-group"><label>Фото</label><input type="file" id="fileImages" accept="image/*" multiple class="form-control" onchange="handleFileSelect(event)"><div id="imagePreviews" style="display: flex; gap: 8px; margin-top: 6px; overflow-x: auto;"></div></div>
+            
+            <div class="form-group">
+                <label>Теги</label>
+                <button type="button" class="btn-secondary" onclick="openTagsModal()" style="margin-top: 4px; margin-bottom: 6px;">📂 Выбрать теги из списка</button>
+                <div class="chips-container" id="selectedTagsContainer"></div>
+            </div>
+
+            <div class="form-group"><label>Описание</label><textarea class="form-control" id="createDesc" placeholder="Суть встречи..."></textarea></div>
+            <div class="form-group"><label>Адрес</label><input type="text" class="form-control" id="createAddress" placeholder="Место встречи"></div>
+            
+            <!-- Кастомное поле даты и времени -->
+            <div class="form-group">
+                <label>Дата и время</label>
+                <div id="selectedDateTimeDisplay" class="form-control" style="cursor: pointer; display: flex; justify-content: space-between; align-items: center;" onclick="openDateTimeModal()">
+                    <span id="dateTimeText">Выберите дату и время</span> <span>📅</span>
+                </div>
+            </div>
+            
+            <!-- Длительность через красивую модалку -->
+            <div class="form-group">
+                <label>Длительность</label>
+                <div id="selectedDurationDisplay" class="form-control" style="cursor: pointer; display: flex; justify-content: space-between; align-items: center;" onclick="openDurationModal()">
+                    <span id="durationText">2 часа</span> <span>▼</span>
+                </div>
+            </div>
+
+            <div class="form-group"><label>Участников</label><input type="text" class="form-control" id="createMaxPart" placeholder="10"></div>
+            
+            <!-- Ограничения через красивую модалку с множественным выбором -->
+            <div class="form-group">
+                <label>Ограничения</label>
+                <div id="selectedRestrictionsDisplay" class="form-control" style="cursor: pointer; display: flex; justify-content: space-between; align-items: center;" onclick="openRestrictionsModal()">
+                    <span id="restrictionsText">16+</span> <span>▼</span>
+                </div>
+            </div>
+
+            <div class="form-group"><label>Чек-лист</label><input type="text" class="form-control" id="createChecklist" placeholder="Плед, термос"></div>
+            <button class="btn-primary" onclick="submitCreateEvent()">Опубликовать</button>
+            <button class="btn-secondary" onclick="goBackToFeed()">Отмена</button>
+        </div>
+    </div>
+
+    <div class="fab-container" id="fabContainer">
+        <button class="fab" id="fabBtn" onclick="handleFabClick()"><span>+</span></button>
+    </div>
+
+    <!-- Модалка деталей -->
+    <div id="eventModal" class="modal" onclick="closeModal(event)">
+        <div class="modal-content">
+            <div class="modal-img-slider" id="modalImgContainer">📍</div>
+            <h3 id="modalTitle">Название</h3>
+            <p style="font-size: 11px; color: var(--gray-text); margin-bottom: 4px;">Организатор: <span id="modalAuthor" style="font-weight: bold; color: var(--primary-terracotta);"></span></p>
+            <div class="modal-address" id="modalAddress">Адрес</div>
+            <div style="font-size: 12px; color: var(--dark-brown); margin-bottom: 6px;">⏳ Время: <span id="modalTime"></span></div>
+            <div style="font-size: 12px; color: var(--dark-brown); margin-bottom: 6px;">👥 Участников: <span id="modalParticipantsCount">0</span> / <span id="modalMaxPart"></span></div>
+            <div class="modal-desc" id="modalDesc">Описание...</div>
+            <button class="join-btn" style="background-color: var(--accent-olive); color: white; border: none; padding: 8px; border-radius: 10px; font-weight: bold; width: 100%; cursor: pointer; margin-top: 10px; margin-bottom: 4px;" onclick="closeModalDirect()">Присоединиться</button>
+            <button style="background: none; border: none; color: var(--gray-text); font-size: 12px; cursor: pointer; width: 100%;" onclick="closeModalDirect()">Закрыть</button>
+        </div>
+    </div>
+
+    <!-- Нижняя навигация -->
+    <nav class="bottom-nav" id="bottomNav">
+        <button class="nav-item active" id="nav-feed" onclick="switchTab('screen-feed', this)"><span class="nav-icon">📜</span><span>Лента</span></button>
+        <button class="nav-item" id="nav-search" onclick="switchTab('screen-search', this)"><span class="nav-icon">🔍</span><span>Поиск</span></button>
+        <button class="nav-item" id="nav-chats" onclick="switchTab('screen-chats', this)"><span class="nav-icon">💬</span><span>Чаты</span></button>
+        <button class="nav-item" id="nav-match" onclick="switchTab('screen-match', this)"><span class="nav-icon">🤝</span><span>Подбор</span></button>
+        <button class="nav-item" id="nav-profile" onclick="switchTab('screen-profile', this)"><span class="nav-icon">👤</span><span>Профиль</span></button>
+    </nav>
+</div>
+
+<script>
+    let allEvents = [];
+    let allInterestTags = [];
+    let uploadedImagesBase64 = [];
+    let selectedSearchTags = [];
+    let selectedRestrictionsList = ["16+"];
+    let savedDateTimeValue = "";
+
+    function createLeaves() {
+        const container = document.getElementById('leavesContainer');
+        const leafIcons = ['🍁', '🍂', '🍃'];
+        for (let i = 0; i < 22; i++) {
+            const leaf = document.createElement('div');
+            leaf.className = 'leaf';
+            leaf.innerText = leafIcons[Math.floor(Math.random() * leafIcons.length)];
+            leaf.style.left = Math.random() * 98 + '%';
+            leaf.style.animationDuration = (Math.random() * 4 + 4) + 's';
+            leaf.style.animationDelay = (Math.random() * 6) + 's';
+            leaf.style.fontSize = (Math.random() * 4 + 13) + 'px';
+            container.appendChild(leaf);
+        }
+    }
+
+    async function loadInterestTags() {
+        let res = await fetch('/api/interest_tags');
+        allInterestTags = await res.json();
+        renderModalTags();
+        renderSearchModalTags();
+    }
+
+    function renderModalTags() {
+        let container = document.getElementById('modalTagsContainer');
+        if (!container) return;
+        container.innerHTML = '';
+        
+        let categories = {
+            'sport': '⚽ Спорт',
+            'fandom': '🎮 Фандом',
+            'hobby': '🎨 Хобби',
+            'fun': '🎉 Досуг',
+            'other': '📌 Общие'
+        };
+
+        let currentSelected = Array.from(document.querySelectorAll('#selectedTagsContainer .chip')).map(c => c.innerText);
+
+        for (let [catKey, catTitle] of Object.entries(categories)) {
+            let catTags = allInterestTags.filter(t => t.category === catKey);
+            if (catTags.length > 0) {
+                let titleEl = document.createElement('div');
+                titleEl.style.fontSize = '12px';
+                titleEl.style.fontWeight = 'bold';
+                titleEl.style.color = 'var(--primary-terracotta)';
+                titleEl.style.marginTop = '8px';
+                titleEl.style.marginBottom = '4px';
+                titleEl.innerText = catTitle;
+                container.appendChild(titleEl);
+
+                let chipsDiv = document.createElement('div');
+                chipsDiv.className = 'chips-container';
+
+                catTags.forEach(t => {
+                    let chip = document.createElement('span');
+                    chip.className = 'chip' + (currentSelected.includes(t.tag_name) ? ' selected' : '');
+                    chip.innerText = t.tag_name;
+                    chip.onclick = () => chip.classList.toggle('selected');
+                    chipsDiv.appendChild(chip);
+                });
+                container.appendChild(chipsDiv);
+            }
+        }
+    }
+
+    function renderSearchModalTags() {
+        let container = document.getElementById('searchFilterModalTags');
+        if (!container) return;
+        container.innerHTML = '';
+        allInterestTags.forEach(t => {
+            let chip = document.createElement('span');
+            chip.className = 'chip' + (selectedSearchTags.includes(t.tag_name) ? ' selected' : '');
+            chip.innerText = t.tag_name;
+            chip.onclick = () => chip.classList.toggle('selected');
+            container.appendChild(chip);
+        });
+    }
+
+    function openTagsModal() { document.getElementById('tagsModal').style.display = 'flex'; renderModalTags(); }
+    
+    function addModalCustomTag() {
+        let input = document.getElementById('modalCustomTagInput');
+        let val = input.value.trim();
+        if (val) {
+            let container = document.getElementById('modalTagsContainer');
+            let chip = document.createElement('span');
+            chip.className = 'chip selected';
+            chip.innerText = val;
+            chip.onclick = () => chip.classList.toggle('selected');
+            
+            let customChipsDiv = document.getElementById('customTagsChipsDiv');
+            if (!customChipsDiv) {
+                let titleEl = document.createElement('div');
+                titleEl.style.fontSize = '12px';
+                titleEl.style.fontWeight = 'bold';
+                titleEl.style.color = 'var(--primary-terracotta)';
+                titleEl.style.marginTop = '8px';
+                titleEl.style.marginBottom = '4px';
+                titleEl.innerText = '✨ Ваши теги';
+                container.appendChild(titleEl);
+
+                customChipsDiv = document.createElement('div');
+                customChipsDiv.id = 'customTagsChipsDiv';
+                customChipsDiv.className = 'chips-container';
+                container.appendChild(customChipsDiv);
+            }
+            customChipsDiv.appendChild(chip);
+            input.value = '';
+        }
+    }
+
+    function closeTagsModal() {
+        document.getElementById('tagsModal').style.display = 'none';
+        let container = document.getElementById('selectedTagsContainer');
+        container.innerHTML = '';
+        document.querySelectorAll('#tagsModal .chip.selected').forEach(c => {
+            let span = document.createElement('span');
+            span.className = 'chip selected';
+            span.innerText = c.innerText;
+            span.onclick = () => span.remove();
+            container.appendChild(span);
+        });
+    }
+    function closeTagsModalOutside(e) { if (e.target.id === 'tagsModal') closeTagsModal(); }
+
+    function openSearchTagsModal() { document.getElementById('searchTagsModal').style.display = 'flex'; renderSearchModalTags(); }
+    function applySearchFiltersModal() {
+        selectedSearchTags = [];
+        document.querySelectorAll('#searchFilterModalTags .chip.selected').forEach(c => {
+            selectedSearchTags.push(c.innerText);
+        });
+        document.getElementById('searchTagsModal').style.display = 'none';
+        filterSearchTab();
+    }
+    function closeSearchTagsModalOutside(e) { if (e.target.id === 'searchTagsModal') document.getElementById('searchTagsModal').style.display = 'none'; }
+
+    // Длительность модалка
+    function openDurationModal() { document.getElementById('durationModal').style.display = 'flex'; }
+    function selectDurationOption(el, val) {
+        document.getElementById('durationText').innerText = val;
+        document.querySelectorAll('#durationChipsContainer .chip').forEach(c => c.classList.remove('selected'));
+        el.classList.add('selected');
+        document.getElementById('durationModal').style.display = 'none';
+    }
+    function addCustomDuration() {
+        let val = document.getElementById('customDurationInput').value.trim();
+        if (val) {
+            document.getElementById('durationText').innerText = val;
+            document.getElementById('customDurationInput').value = '';
+            document.getElementById('durationModal').style.display = 'none';
+        }
+    }
+
+    // Ограничения модалка
+    function openRestrictionsModal() { document.getElementById('restrictionsModal').style.display = 'flex'; }
+    function toggleRestrictionOption(el, val) {
+        el.classList.toggle('selected');
+        if (selectedRestrictionsList.includes(val)) {
+            selectedRestrictionsList = selectedRestrictionsList.filter(x => x !== val);
+        } else {
+            selectedRestrictionsList.push(val);
+        }
+        document.getElementById('restrictionsText').innerText = selectedRestrictionsList.length > 0 ? selectedRestrictionsList.join(', ') : 'Не выбрано';
+    }
+    function addCustomRestriction() {
+        let val = document.getElementById('customRestrictionInput').value.trim();
+        if (val && !selectedRestrictionsList.includes(val)) {
+            selectedRestrictionsList.push(val);
+            document.getElementById('restrictionsText').innerText = selectedRestrictionsList.join(', ');
+            document.getElementById('customRestrictionInput').value = '';
+            
+            let container = document.getElementById('restrictionsChipsContainer');
+            let chip = document.createElement('span');
+            chip.className = 'chip selected';
+            chip.innerText = val;
+            chip.onclick = () => toggleRestrictionOption(chip, val);
+            container.appendChild(chip);
+        }
+    }
+
+    // Дата и время модалка
+    function openDateTimeModal() {
+        document.getElementById('dateTimeModal').style.display = 'flex';
+        if (!document.getElementById('modalDateInput').value) {
+            let now = new Date();
+            document.getElementById('modalDateInput').value = now.toISOString().split('T')[0];
+            document.getElementById('modalTimeInput').value = "18:00";
+        }
+    }
+
+    function applyDateTime() {
+        let dateVal = document.getElementById('modalDateInput').value;
+        let timeVal = document.getElementById('modalTimeInput').value;
+        if (dateVal && timeVal) {
+            savedDateTimeValue = `${dateVal} ${timeVal}`;
+            document.getElementById('dateTimeText').innerText = savedDateTimeValue;
+            document.getElementById('dateTimeModal').style.display = 'none';
+        } else {
+            alert('Выберите дату и время!');
+        }
+    }
+
+    function closeModalOutside(e, modalId) {
+        if (e.target.id === modalId) document.getElementById(modalId).style.display = 'none';
+    }
+
+    function showSuggestions(inputId, boxId) {
+        let inputVal = document.getElementById(inputId).value.toLowerCase().trim();
+        let box = document.getElementById(boxId);
+        if (!box) return;
+        box.innerHTML = '';
+
+        if (!inputVal) { box.style.display = 'none'; return; }
+
+        let matches = [];
+        allEvents.forEach(ev => {
+            if (ev.title.toLowerCase().includes(inputVal) && !matches.includes(ev.title)) matches.push(ev.title);
+        });
+
+        allInterestTags.forEach(t => {
+            if (t.tag_name.toLowerCase().includes(inputVal) && !matches.includes(t.tag_name)) matches.push(t.tag_name);
+        });
+
+        if (matches.length > 0) {
+            box.style.display = 'block';
+            matches.slice(0, 5).forEach(m => {
+                let item = document.createElement('div');
+                item.className = 'suggestion-item';
+                item.innerText = m;
+                item.onclick = () => {
+                    document.getElementById(inputId).value = m;
+                    box.style.display = 'none';
+                    if (inputId === 'searchInput') filterEvents();
+                    if (inputId === 'searchTabInput') filterSearchTab();
+                };
+                box.appendChild(item);
+            });
+        } else {
+            box.style.display = 'none';
+        }
+    }
+
+    function clearSearchFilter() {
+        selectedSearchTags = [];
+        document.querySelectorAll('#searchFilterModalTags .chip').forEach(c => c.classList.remove('selected'));
+        document.getElementById('searchTagsModal').style.display = 'none';
+        filterSearchTab();
+    }
+
+    function handleFileSelect(event) {
+        const files = event.target.files;
+        const previewContainer = document.getElementById('imagePreviews');
+        previewContainer.innerHTML = '';
+        uploadedImagesBase64 = [];
+        Array.from(files).forEach(file => {
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                uploadedImagesBase64.push(e.target.result);
+                const img = document.createElement('img');
+                img.src = e.target.result;
+                img.style.width = '50px'; img.style.height = '50px'; img.style.borderRadius = '6px'; img.style.objectFit = 'cover';
+                previewContainer.appendChild(img);
+            };
+            reader.readAsDataURL(file);
+        });
+    }
+
+    function handleFabClick() { switchTab('screen-create', null); }
+    function goBackToFeed() { switchTab('screen-feed', document.getElementById('nav-feed')); }
+
+    async function loadEvents() {
+        let response = await fetch('/api/events');
+        allEvents = await response.json();
+        renderEvents(allEvents, 'eventsList');
+        renderEvents(allEvents, 'searchTabList');
+    }
+
+    function renderEvents(events, containerId) {
+        let listContainer = document.getElementById(containerId);
+        if (!listContainer) return;
+        listContainer.innerHTML = '';
+        events.forEach(ev => {
+            let card = document.createElement('div');
+            card.className = `event-card ${ev.is_official ? 'official' : ''}`;
+            card.onclick = () => openEventModal(ev);
+            let images = ev.images ? ev.images.split('|||') : [];
+            let iconOrImg = images.length > 0 && images[0].trim() !== '' ? `<img src="${images[0].trim()}">` : '🍁';
+            card.innerHTML = `<div class="event-img">${iconOrImg}</div><div class="event-info"><h4>${ev.title}</h4><p>${ev.address || ev.category} • ${ev.tags || ''}</p></div>`;
+            listContainer.appendChild(card);
+        });
+    }
+
+    function filterEvents() {
+        let query = document.getElementById('searchInput').value.toLowerCase();
+        let filtered = allEvents.filter(ev => ev.title.toLowerCase().includes(query) || (ev.tags && ev.tags.toLowerCase().includes(query)));
+        renderEvents(filtered, 'eventsList');
+    }
+
+    function filterSearchTab() {
+        let query = document.getElementById('searchTabInput').value.toLowerCase();
+        let filtered = allEvents.filter(ev => {
+            let matchesQuery = ev.title.toLowerCase().includes(query) || (ev.tags && ev.tags.toLowerCase().includes(query));
+            let matchesTags = selectedSearchTags.length === 0 || selectedSearchTags.every(st => ev.tags && ev.tags.toLowerCase().includes(st.toLowerCase()));
+            return matchesQuery && matchesTags;
+        });
+        renderEvents(filtered, 'searchTabList');
+    }
+
+    async function submitCreateEvent() {
+        let selectedTags = Array.from(document.querySelectorAll('#selectedTagsContainer .chip')).map(c => c.innerText).join(', ');
+        let data = {
+            title: document.getElementById('createTitle').value,
+            author: document.getElementById('createAuthor').value || "Ирис",
+            images: uploadedImagesBase64.join('|||'),
+            description: document.getElementById('createDesc').value,
+            address: document.getElementById('createAddress').value,
+            date_time: savedDateTimeValue || "Скоро",
+            duration: document.getElementById('durationText').innerText,
+            max_participants: document.getElementById('createMaxPart').value,
+            restrictions: selectedRestrictionsList.join(', '),
+            checklist: document.getElementById('createChecklist').value,
+            tags: selectedTags
+        };
+
+        if (!data.title || !data.description) { alert('Заполни название и описание!'); return; }
+
+        let res = await fetch('/api/events', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (res.ok) { alert('Создано!'); loadEvents(); goBackToFeed(); }
+    }
+
+    async function openEventModal(ev) {
+        document.getElementById('modalTitle').innerText = ev.title;
+        document.getElementById('modalAuthor').innerText = ev.author || "Организатор";
+        document.getElementById('modalAddress').innerText = "📍 " + (ev.address || "Адрес не указан");
+        document.getElementById('modalTime').innerText = ev.date_time || "Время не указано";
+        document.getElementById('modalMaxPart').innerText = ev.max_participants || "Неограниченно";
+        document.getElementById('modalDesc').innerText = ev.description || "";
+        document.getElementById('eventModal').style.display = 'flex';
+    }
+
+    function closeModalDirect() { document.getElementById('eventModal').style.display = 'none'; }
+    function closeModal(event) { if (event.target.id === 'eventModal') closeModalDirect(); }
+
+    function switchTab(screenId, element) {
+        document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+        document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
+        document.getElementById(screenId).classList.add('active');
+        if (element) element.classList.add('active');
+    }
+
+    createLeaves();
+    loadEvents();
+    loadInterestTags();
+</script>
+
+</body>
+</html>
+"""
+
+# --- 3. СЕРВЕР ---
+class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/':
+            self.send_response(200)
+            self.send_header('Content-type', 'text/html; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(HTML_CODE.encode('utf-8'))
+        elif self.path.startswith('/api/events'):
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            cursor.execute("SELECT id, title, author, category, tags, description, address, date_time, duration, max_participants, restrictions, extra_info, checklist, format_type, images, is_official FROM events")
+            rows = cursor.fetchall()
+            events = [{"id": r[0], "title": r[1], "author": r[2], "category": r[3], "tags": r[4], "description": r[5], "address": r[6], "date_time": r[7], "duration": r[8], "max_participants": r[9], "restrictions": r[10], "extra_info": r[11], "checklist": r[12], "format_type": r[13], "images": r[14], "is_official": r[15]} for r in rows]
+            self.wfile.write(json.dumps(events).encode('utf-8'))
+        elif self.path == '/api/interest_tags':
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            cursor.execute("SELECT category, tag_name FROM interest_tags")
+            rows = cursor.fetchall()
+            tags = [{"category": r[0], "tag_name": r[1]} for r in rows]
+            self.wfile.write(json.dumps(tags).encode('utf-8'))
+
+    def do_POST(self):
+        content_length = int(self.headers['Content-Length'])
+        post_data = self.rfile.read(content_length)
+        data = json.loads(post_data.decode('utf-8'))
+
+        if self.path == '/api/events':
+            cursor.execute('''
+                INSERT INTO events (title, author, category, tags, description, address, date_time, duration, max_participants, restrictions, extra_info, checklist, format_type, images)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (data.get('title'), data.get('author'), "Встреча", data.get('tags'), data.get('description'), data.get('address'), data.get('date_time'), data.get('duration'), data.get('max_participants'), data.get('restrictions'), data.get('extra_info'), data.get('checklist'), data.get('format_type'), data.get('images')))
+            conn.commit()
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({"status": "success"}).encode('utf-8'))
+
+print("Сервер запущен! Открой браузер: http://localhost:8000")
+httpd = HTTPServer(('0.0.0.0', 8000), SimpleHTTPRequestHandler)
+httpd.serve_forever()
